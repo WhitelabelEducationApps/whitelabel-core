@@ -29,6 +29,8 @@ open class ItemDetailViewModel<T : DisplayableItem>(
     private val _uiState = MutableStateFlow<ItemDetailUiState>(ItemDetailUiState.Loading)
     val uiState: StateFlow<ItemDetailUiState> = _uiState.asStateFlow()
 
+    private var hasMarkedViewed = false
+
     private val _wallpaperStatus = MutableStateFlow<WallpaperStatus>(WallpaperStatus.Idle)
     val wallpaperStatus: StateFlow<WallpaperStatus> = _wallpaperStatus.asStateFlow()
 
@@ -47,7 +49,10 @@ open class ItemDetailViewModel<T : DisplayableItem>(
                         is Result.Success -> {
                             val item = result.data
                             if (item != null) {
-                                repository.markAsViewed(itemId)
+                                if (!hasMarkedViewed) {
+                                    hasMarkedViewed = true
+                                    repository.markAsViewed(itemId)
+                                }
                                 // Resolve group metadata for localized display
                                 val groupKey = item.groupKey
                                 val localizedGroupName = if (groupKey != null) {

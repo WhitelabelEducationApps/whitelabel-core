@@ -11,8 +11,11 @@ import com.whitelabel.core.domain.usecase.ToggleFavoriteUseCase
 import com.whitelabel.core.presentation.ViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+
+private val noOpFilter: (Any) -> Boolean = { _ -> true }
 
 /**
  * Generic home screen ViewModel. Works with any DisplayableItem type.
@@ -25,7 +28,9 @@ open class HomeViewModel<T : DisplayableItem>(
     private val repository: ItemRepository<T>,
     private val itemGrouper: ItemGrouper<T>,
     private val languageProvider: LanguageProvider,
-    private val coroutineScope: CoroutineScope
+    private val coroutineScope: CoroutineScope,
+    @Suppress("UNCHECKED_CAST")
+    private val itemFilter: Flow<(T) -> Boolean> = flowOf(noOpFilter as (T) -> Boolean)
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -40,18 +45,48 @@ open class HomeViewModel<T : DisplayableItem>(
     private val _focusedItemId = MutableStateFlow<Long?>(null)
     val focusedItemId: StateFlow<Long?> = _focusedItemId.asStateFlow()
 
+    private val refreshTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    private val _totalItemCount = MutableStateFlow(0L)
+    val totalItemCount: StateFlow<Long> = _totalItemCount.asStateFlow()
+
     init {
+        coroutineScope.launch {
+            when (val result = repository.getItemCount()) {
+                is Result.Success -> _totalItemCount.value = result.data
+                else -> {}
+            }
+        }
         loadItems()
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private fun loadItems() {
         coroutineScope.launch {
-            combine(searchQuery, languageProvider.selectedLanguage) { query, _ -> query }
-                .flatMapLatest { query ->
-                    if (query.isBlank()) getItemsUseCase() else searchItemsUseCase(query)
+            combine(
+                searchQuery,
+                languageProvider.selectedLanguage,
+                itemFilter,
+                refreshTrigger.onStart { emit(Unit) }
+            ) { query, _, filter, _ -> Pair(query, filter) }
+                .flatMapLatest { (query, filter) ->
+                    val rawFlow = if (query.isBlank()) getItemsUseCase() else searchItemsUseCase(query)
+                    rawFlow.map { result ->
+                        when (result) {
+                            is Result.Success -> Result.Success(result.data.filter(filter))
+                            else -> result
+                        }
+                    }
                 }
                 .collect { result ->
+                    when (result) {
+                        is Result.Success -> {
+                            val firstFav = result.data.firstOrNull { it.isFavorite }
+                            val firstItem = result.data.firstOrNull()
+                            println("[HomeViewModel] Refreshed ${result.data.size} items, firstFav=$firstFav, firstItem.id=${firstItem?.id}, firstItem.isFav=${firstItem?.isFavorite}")
+                        }
+                        else -> {}
+                    }
                     _uiState.value = when (result) {
                         is Result.Success -> {
                             if (result.data.isEmpty()) {
@@ -83,6 +118,8 @@ open class HomeViewModel<T : DisplayableItem>(
     fun onFavoriteClick(item: T) {
         coroutineScope.launch {
             toggleFavoriteUseCase(item)
+            delay(100) // Give DB transaction time to complete
+            refreshTrigger.tryEmit(Unit)
         }
     }
 
