@@ -15,6 +15,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
+private val noOpFilter: (Any) -> Boolean = { _ -> true }
+
 /**
  * Generic home screen ViewModel. Works with any DisplayableItem type.
  * Grouping logic is delegated to [ItemGrouper] (strategy pattern).
@@ -26,7 +28,9 @@ open class HomeViewModel<T : DisplayableItem>(
     private val repository: ItemRepository<T>,
     private val itemGrouper: ItemGrouper<T>,
     private val languageProvider: LanguageProvider,
-    private val coroutineScope: CoroutineScope
+    private val coroutineScope: CoroutineScope,
+    @Suppress("UNCHECKED_CAST")
+    private val itemFilter: Flow<(T) -> Boolean> = flowOf(noOpFilter as (T) -> Boolean)
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -43,7 +47,16 @@ open class HomeViewModel<T : DisplayableItem>(
 
     private val refreshTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
+    private val _totalItemCount = MutableStateFlow(0L)
+    val totalItemCount: StateFlow<Long> = _totalItemCount.asStateFlow()
+
     init {
+        coroutineScope.launch {
+            when (val result = repository.getItemCount()) {
+                is Result.Success -> _totalItemCount.value = result.data
+                else -> {}
+            }
+        }
         loadItems()
     }
 
@@ -53,10 +66,17 @@ open class HomeViewModel<T : DisplayableItem>(
             combine(
                 searchQuery,
                 languageProvider.selectedLanguage,
+                itemFilter,
                 refreshTrigger.onStart { emit(Unit) }
-            ) { query, _, _ -> query }
-                .flatMapLatest { query ->
-                    if (query.isBlank()) getItemsUseCase() else searchItemsUseCase(query)
+            ) { query, _, filter, _ -> Pair(query, filter) }
+                .flatMapLatest { (query, filter) ->
+                    val rawFlow = if (query.isBlank()) getItemsUseCase() else searchItemsUseCase(query)
+                    rawFlow.map { result ->
+                        when (result) {
+                            is Result.Success -> Result.Success(result.data.filter(filter))
+                            else -> result
+                        }
+                    }
                 }
                 .collect { result ->
                     when (result) {
