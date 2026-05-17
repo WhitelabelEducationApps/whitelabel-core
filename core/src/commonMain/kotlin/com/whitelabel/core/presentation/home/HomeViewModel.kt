@@ -11,6 +11,7 @@ import com.whitelabel.core.domain.usecase.ToggleFavoriteUseCase
 import com.whitelabel.core.presentation.ViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -40,6 +41,8 @@ open class HomeViewModel<T : DisplayableItem>(
     private val _focusedItemId = MutableStateFlow<Long?>(null)
     val focusedItemId: StateFlow<Long?> = _focusedItemId.asStateFlow()
 
+    private val refreshTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
     init {
         loadItems()
     }
@@ -47,11 +50,23 @@ open class HomeViewModel<T : DisplayableItem>(
     @OptIn(ExperimentalCoroutinesApi::class)
     private fun loadItems() {
         coroutineScope.launch {
-            combine(searchQuery, languageProvider.selectedLanguage) { query, _ -> query }
+            combine(
+                searchQuery,
+                languageProvider.selectedLanguage,
+                refreshTrigger.onStart { emit(Unit) }
+            ) { query, _, _ -> query }
                 .flatMapLatest { query ->
                     if (query.isBlank()) getItemsUseCase() else searchItemsUseCase(query)
                 }
                 .collect { result ->
+                    when (result) {
+                        is Result.Success -> {
+                            val firstFav = result.data.firstOrNull { it.isFavorite }
+                            val firstItem = result.data.firstOrNull()
+                            println("[HomeViewModel] Refreshed ${result.data.size} items, firstFav=$firstFav, firstItem.id=${firstItem?.id}, firstItem.isFav=${firstItem?.isFavorite}")
+                        }
+                        else -> {}
+                    }
                     _uiState.value = when (result) {
                         is Result.Success -> {
                             if (result.data.isEmpty()) {
@@ -83,6 +98,8 @@ open class HomeViewModel<T : DisplayableItem>(
     fun onFavoriteClick(item: T) {
         coroutineScope.launch {
             toggleFavoriteUseCase(item)
+            delay(100) // Give DB transaction time to complete
+            refreshTrigger.tryEmit(Unit)
         }
     }
 
